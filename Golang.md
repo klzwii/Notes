@@ -400,12 +400,97 @@ Go语言内存模型遵守DRF-SC，
 即如果程序是DRF的(Data-Race Free 无数据争用)，那么SC将被满足。
 SC(Sequential Consistency): 并行的内存访问顺序，与程序指定顺序完全相同
 
-### 数据争用
+### Synchronizes Before
 
+- 创建goroutine的语句Synchronizes Before goroutine的执行
+- 对channel的发送Synchronizes Before对channel的接受完成
+- 对无缓冲channel的接受Synchronizes Before此次发送完成
+- 对于容量为C的channel，第k次接受Synchronizes Before k+C次发送完成
+- 对于sync.Mutex和sync.RWMutex l， 任取n < m, 第n次l.UnLock，Synchronizes Before 第m次l.Lock()
+- once.Do(f)的完成Synchronizes Before该函数的返回
+- 对于sync/atomics，对值的操作Synchronizes Before该值对当前goroutine可见
+- 对SetFinalizer的调用Synchronizes Before对Finalizer的执行
 
-     
+### 内存管理 <cited>runtime/malloc.go</cited>
+主分配器是以页为单位工作的。
+分配小对象时（小于等于32kB）被向上取整到大约70个大小类别中的一个。
+每个大小类别都有自己的空闲对象集，一个集合中的对象大小完全相等。
+任何空闲的内存页都可以被分割成相同大小的一组对象，然后用一个标识对应对象是否被使用的位图来管理。
+
+分配器的数据结构如下:
+
+- fixalloc：一个分配固定大小的堆外对象的空闲列表(free-list)分配器，被用来管理分配器使用的存储空间。
+- mheap：malloc使用的堆，以页（8192字节）的粒度管理。
+- mspan: 由mheap管理的一系列已被使用的内存页。
+- mcentral: 存有某一大小类别的全部mspan。
+- mcache: 一个有空闲空间的mspans的每个P独占的缓存。  
+- mstats：分配统计。
+
+小对象的分配遵循如下的缓存层次:
+1. 将大小向上取整到大小类中的一个。并在这个P对应的mcache中寻找相应的mspan。
+扫描mspan的空闲位图来找到一个空闲槽。如果有一个空闲的槽，就分配它。
+这一切都可以在不获取锁的情况下完成。
+
+1. 如果mspan没有空闲槽位，从mcentral的空闲槽位中获取一个新的mspan。
+从mcentral的所需大小的mspans列表中获得一个新的mspan
+有空闲空间的类。获得一个完整的mspan可以分摊锁定mcentral的成本。
+mcentral。
+
+1. 如果mcentral的mspan列表是空的，就从mheap中获取一系列内存也。
+从mheap中获取一个页面，用于构建mspan。
+
+1. 如果mheap是空的或者没有足够大的一系列内存页。go将会从操作系统中分配一系列新的内存页（至少1MB）。
+分配一个很大的内存均摊了系统调用的成本。
+
+清理一个mspan并释放其上对象的过程遵循相似层次结构。
+
+1. 如果mspan是为了满足新的空间分配从而被清理，那么它将被返回到mcache以满足分配。
+
+2. 否则，如果mspan中仍有没有被释放的对象。它将被放置在与mspan大小类相同的mcentral的空闲列表中。
+
+3. 最后，如果mspan中的所有对象都被释放，那么mspan的的页面被返回到mheap，此时mspan被标记为dead。
+
+分配和释放一个大对象时，将会绕过mcache和mcentral，直接使用mheap。
+
+如果mspan.needzero为false，那么mspan中的空闲对象都已经被提前置空。
+如果needzero为true，则对象在分配时被置空。
+延迟置空有如下的好处:
+
+1. 栈帧分配完全不需要置空。
+
+2. 它更好的利用了时间局部性，因为程序很可能要对这块内存进行写入。
+
+3. 我们不需要置空之后不会再重复使用的页面。
+
+虚拟内存布局
+
+堆由一组arena组成，arena的大小在64位上是64MB，在32位上是4MB。
+每个arena的起始地址与arena的大小对齐。
+
+每个arena都有一个相关的heapArena对象，存储该arena的元数据:
+- 该arena中所有word的位图
+- 该arena中所有内存页对应的spanmap。
+heapArena对象在堆外分配。
+
+由于arena内存地址是对齐的，地址空间可以被看作是一个一系列的arena块。
+arena map（mheap_.arena）将从arena块的编号映射到*heapArena。
+不由go堆管理的地址空间将被映射为nil。
+arena map是由一个 L1 arena map和许多 L2 arena map组成的两维数组。
+然而，由于arena很大，在许多架构上，arena map仅由一个单独的大的L2 map组成。
+
+arena map覆盖整个可能的地址空间，允许Go堆使用地址空间的任何部分。
+分配器试图保持arena连续，以便大的span（以及通过其分配的大的对象）可以跨arena。
+mcache:
+mcache通过spcanClass进行mspan的索引。
+spanClass的类型是uint8，最低位表示该mspan是否包含指针(不包含指针可以减少GC对其的扫描)，其它位表示他所索引的mspan的大小类。
+
+tinyalloc:
+Go对不包含指针的小对象(<=16B)有一些分配优化。mcache会直接通过保存的一个大小为16B的block为其分配对应的空间，这样会让多个不同的小对象存在于同一个block中从而增加空间利用率。
 
 ## 相关源码
+
+### //go:nosplit
+在runtime包可以看到很多该标签 该标签禁止紧随其后的函数进行栈溢出检查，该检查在golang调度器尝试抢占某一goroutine是必须的，因此带有该标签的函数无法被抢占。
 
 ### casgstatus
 ```Go
@@ -441,8 +526,27 @@ func casgstatus(gp *g, oldval, newval uint32) {
 }
 ```
 
+### sematable
+sematable是Golang中信号量的实现
+
+```Go
+type semaRoot struct {
+	lock  mutex
+	treap *sudog // root of balanced tree of unique waiters.
+	nwait uint32 // Number of waiters. Read w/o the lock.
+}
+type semTable [semTabSize]struct {
+	root semaRoot
+	pad  [cpu.CacheLinePadSize - unsafe.Sizeof(semaRoot{})]byte
+}
+func (t *semTable) rootFor(addr *uint32) *semaRoot {
+	return &t[(uintptr(unsafe.Pointer(addr))>>3)%semTabSize].root
+}
+```
+
 ### sudog
 
+sudog表示一个正在等待(channel/semaphore...)的goroutine
 ```Go
 type sudog struct {
 	// The following fields are protected by the hchan.lock of the
@@ -479,6 +583,23 @@ type sudog struct {
 	waittail *sudog // semaRoot
 	c        *hchan // channel
 ```
+## Go GC
+
+### gc 消耗模型
+
+1. GC只涉及两种资源。CPU时间，和物理内存。
+
+2. GC的内存成本由存活堆内存、标记阶段前分配的新堆内存和元数据占用组成。其中元数据即使与前两者消耗成正比，但相比之下也很小。
+
+3. GC的CPU消耗被分为为每个周期的固定消耗，以及与活堆大小成比例的额外消耗。
+
+## 常见golang优化手段
+
+### fastslow path
+通过将快速常见轻量逻辑的分支与不常见的分支分离在不同的函数，保证快速分支能够被inline，减少函数调用时间。
+
+### false-sharing emit
+对于需要被并发访问的结构体数组，对其中每个结构体增加padding确保其对cpu的cacheline的大小对齐，防止出现false-sharing。
 
 [1]: https://go.dev/ref/mem
 [2]: https://go.dev/ref/spec

@@ -1,5 +1,29 @@
-
+- [关系数据库基本概念](#关系数据库基本概念)
+  - [ACID](#acid)
+  - [脏读 幻读 不可重复读](#脏读-幻读-不可重复读)
+  - [读未提交 读已提交 可重复读 串行化](#读未提交-读已提交-可重复读-串行化)
+- [MySQL 相关](#mysql-相关)
+  - [InnoDB](#innodb)
+    - [聚簇索引与二级索引](#聚簇索引与二级索引)
+    - [Redo Log](#redo-log)
+    - [Undo Logs](#undo-logs)
+    - [Multi-Versioning](#multi-versioning)
+    - [快照读](#快照读)
+    - [锁](#锁)
+      - [共享锁，独占锁](#共享锁独占锁)
+      - [意向锁](#意向锁)
+      - [记录锁](#记录锁)
+      - [间隙锁](#间隙锁)
+      - [插入意向锁](#插入意向锁)
+      - [Next-Key Lock](#next-key-lock)
+    - [不同的sql语句对应的锁](#不同的sql语句对应的锁)
 # 关系数据库基本概念
+
+## ACID
+A: Atomicity
+C: Consistency
+I: Isolation
+D: Durability
 
 ## 脏读 幻读 不可重复读
 脏读 当一个事务读取尚未提交的数据时，就会发生脏读。例如，假设事务1更新了一条记录。事务2在事务1提交更新之前读取了更新的行。如果事务1回滚了这个改变，事务2将读取被认为是不存在的数据。
@@ -15,6 +39,8 @@
 | 读已提交     | 事务会等待被其他事务加写锁的行解锁，这可以防止它读取到任何 "脏 "数据。  事务在当前行上持有一个读锁（如果它只读该行）或写锁（如果它更新或删除该行），以防止其他事务更新或删除它。每个事务在读取当前行时释放读锁，并持有写锁直到它被提交或回滚。                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | 可重复读     | 事务会等待被其他事务加写锁的行解锁；这可以防止它读取任何 "脏 "数据。  事务对它返回给应用程序的所有行持有读锁，对它插入、更新或删除的所有行持有写锁。例如，如果事务包括SQL语句`SELECT * FROM Orders`，事务会在应用程序获取行的时候对其进行读锁。如果事务包括SQL语句`DELETE FROM Orders WHERE Status = 'CLOSED'`，那么事务在删除记录时就会对其进行写锁定。  因为其他事务不能更新或删除这些行，当前事务避免了任何不可重复的读取。事务只会在提交或回滚时释放其锁。                                                                                                                                                                                                                |
 | 可序列化     | 事务会等待被其他事务加写锁的行解锁；这可以防止它读取任何 "脏 "数据。  事务在其影响的行的范围内持有一个读锁（如果它只读行）或写锁（如果它可以更新或删除行）。例如，如果事务包括SQL语句`SELECT * FROM Orders`，范围是整个Orders表；事务对该表进行读锁，不允许向其中插入任何新行。如果事务包括SQL语句`DELETE FROM Orders WHERE Status = 'CLOSED'`，范围是所有状态为 "CLOSED "的记录；事务对Orders表中所有状态为 "CLOSED "的记录进行写锁，不允许插入或更新任何记录，从而导致记录状态为 "CLOSED"。  因为其他事务不能更新或删除该范围内的行，所以当前事务避免了任何不可重复的读取。因为其他事务不能在该范围内插入任何行，所以当前事务消除了幻读。该事务只会在提交或回滚时释放其锁。 |
+
+
 # MySQL 相关
 
 ## InnoDB
@@ -86,6 +112,7 @@ InnoDB支持多粒度锁，允许行锁和表锁共存。例如，诸如`LOCK TA
 - 在事务可以获得表中某行的独占锁之前，它必须首先获得该表的IX锁。
 
 下表总结了**表级锁**的冲突关系
+
 |     | X    | IX     | S      | IS     |
 | --- | ---- | ------ | ------ | ------ |
 | X   | 冲突 | 冲突   | 冲突   | 冲突   |
@@ -93,7 +120,7 @@ InnoDB支持多粒度锁，允许行锁和表锁共存。例如，诸如`LOCK TA
 | S   | 冲突 | 冲突   | 不冲突 | 不冲突 |
 | IS  | 冲突 | 不冲突 | 不冲突 | 不冲突 |
 
-意向锁不会阻塞除完整表请求之外的任何内容（例如，`LOCK TABLES ... WRITE`）。 意向锁的主要目的是表明有人正在锁定一行，或者将要锁定表中的一行。
+意向锁不会阻塞除完整表请求之外的任何内容（例如，`LOCK TABLES ... WRITE`）。 意向锁的主要目的是表明有事务正在锁定一行，或者将要锁定表中的一行。
 
 #### 记录锁
 
@@ -163,11 +190,11 @@ InnoDB执行行级锁的方式是，当它搜索或扫描一个表的索引时�
 
 `CREATE TABLE ... SELECT ...` 像`INSERT ... SELECT`一样使用共享的Next-Key Lock，或者快照读来执行SELECT。
 
-当SELECT被用于构造`REPLACE INTO t SELECT ... FROM s WHERE ...`或者`UPDATE t ... WHERE col IN (SELECT ... FROM s ...)`，InnoDB对表S的记录设置共享的Next-Key Lock。
+当SELECT被用于构造`REPLACE INTO T SELECT ... FROM S WHERE ...`或者`UPDATE T ... WHERE col IN (SELECT ... FROM S ...)`，InnoDB对表S的记录设置共享的Next-Key Lock。
 
 InnoDB在初始化表的一个AUTO_INCREMENT列时，在与AUTO_INCREMENT列相关的索引的末端设置了一个独占锁。
 
 
-
-- [1] https://learn.microsoft.com/en-us/sql/odbc/reference/develop-app/transaction-isolation-levels?view=sql-server-ver16
-- [2] https://dev.mysql.com/doc/refman/8.0/en
+来源：
+- https://learn.microsoft.com/en-us/sql/odbc/reference/develop-app/transaction-isolation-levels?view=sql-server-ver16
+- https://dev.mysql.com/doc/refman/8.0/en
