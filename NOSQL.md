@@ -10,6 +10,33 @@ Cassandra: AP,全部都是对等节点
 
 ## Redis
 
+### qps
+support up to 1'000'000 qps
+
+### why
+
+- efficient data structure
+- multi-plex IO model
+
+### Sentinal
+
+- Monitoring
+  检测当前的主从节点是否正常工作
+- Notification
+  当所监控的某一实例出现问题，Sentinal能够通过api通知系统管理员或者某一自动化程序
+- Automic failover
+  当主节点不工作时，redis可以自动化的将某一从节点提升为主节点，并将更改其它从节点的主节点配置
+- Configuration provider
+  Sentinel也可以充当节点发现服务，连接到Sentinel的客户端能够得到当前可用的主节点地址
+
+### cluster
+
+不采用一致性hash 而采用hash槽（一共16384个槽位）
+redis的每个主节点 持有一定数量的hash槽 命中该hash槽的key会被发送到该节点进行处理。
+在加入一个新的主节点时当前已存在的主节点会移交一部分的hash槽位给新的主节点
+
+#### 分布式共识算法Gossip
+
 ### 常见数据结构
 #### sds
 ```C
@@ -101,3 +128,62 @@ backlen是采用可变长编码的长度用于从后向前便利节点
 例如 0b00001010 0b10001000 0b11010001 表示 0b101000010001010001 
 
 listPack的在空间上连续 因此对于listpack的中间位置的添加 需要移动该位置后的全部内存 造成很大的资源消耗
+
+#### intset
+老朋友 一直没有变动 encoding代表内部存储的元素
+```C
+typedef struct intset {
+    uint32_t encoding;
+    uint32_t length;
+    int8_t contents[];
+} intset;
+```
+
+#### dict
+
+```C
+typedef struct dictEntry {
+    void *key;
+    union {
+        void *val;
+        uint64_t u64;
+        int64_t s64;
+        double d;
+    } v;
+    struct dictEntry *next;     /* Next entry in the same hash bucket. */
+    void *metadata[];           /* An arbitrary number of bytes (starting at a
+                                 * pointer-aligned address) of size as returned
+                                 * by dictType's dictEntryMetadataBytes(). */
+} dictEntry;
+
+typedef struct dict dict;
+
+typedef struct dictType {
+    uint64_t (*hashFunction)(const void *key);
+    void *(*keyDup)(dict *d, const void *key);
+    void *(*valDup)(dict *d, const void *obj);
+    int (*keyCompare)(dict *d, const void *key1, const void *key2);
+    void (*keyDestructor)(dict *d, void *key);
+    void (*valDestructor)(dict *d, void *obj);
+    int (*expandAllowed)(size_t moreMem, double usedRatio);
+    /* Allow a dictEntry to carry extra caller-defined metadata.  The
+     * extra memory is initialized to 0 when a dictEntry is allocated. */
+    size_t (*dictEntryMetadataBytes)(dict *d);
+} dictType;
+
+#define DICTHT_SIZE(exp) ((exp) == -1 ? 0 : (unsigned long)1<<(exp))
+#define DICTHT_SIZE_MASK(exp) ((exp) == -1 ? 0 : (DICTHT_SIZE(exp))-1)
+
+struct dict {
+    dictType *type;
+
+    dictEntry **ht_table[2];
+    unsigned long ht_used[2];
+
+    long rehashidx; /* rehashing not in progress if rehashidx == -1 */
+
+    /* Keep small vars at end for optimal (minimal) struct padding */
+    int16_t pauserehash; /* If >0 rehashing is paused (<0 indicates coding error) */
+    signed char ht_size_exp[2]; /* exponent of size. (size = 1<<exp) */
+};
+```
